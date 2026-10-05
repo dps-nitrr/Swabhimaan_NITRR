@@ -5,7 +5,7 @@
 ## 1. Team Details
 | Name | Role | Email | College / Incubator |
 |------|------|-------|---------------------|
-| (Team leader) | | | |
+| Divya Pratap Singh |Leader |sisodiyadivyapratap@gmail.com |NIT Raipur |
 
 ## 2. Project Title
 **GlucoTwin India**: fusing EHR and wearable/CGM data to predict adverse glucose events (hypo/hyperglycemia) up to 2 hours ahead in Type 2 Diabetes, with a doctor-facing what-if dashboard.
