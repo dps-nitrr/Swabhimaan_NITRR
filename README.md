@@ -125,7 +125,7 @@ A trained `models/fusion_full.pt` is included, so step 4 works right after step 
 - [ ] Presentation PDF/PPT in `docs/`
 
 ## 12. License
-Code: (state your license, e.g. Apache 2.0 or MIT; it must match the `LICENSE` file in the repo).
+Code: MIT License (see the `LICENSE` file in this repository).
 
 Third-party libraries: PyTorch (BSD-style), NumPy / pandas / SciPy / scikit-learn (BSD), Plotly (MIT), Streamlit (Apache 2.0).
 
