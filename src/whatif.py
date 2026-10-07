@@ -4,6 +4,9 @@ Take the patient's current 6-hour window, apply a hypothetical intervention at
 'now' (eat X g carbs, inject Y units insulin, walk Z steps) and ask the model for
 the 2-hour glucose forecast with uncertainty and hypo/hyper risk.
 
+Columns are looked up BY NAME in meta["ts_names"], so it works for any dataset schema:
+  carbs -> "carbs";  insulin -> "insulin" or "insulin_fast";  steps -> "steps" (only if the data has it).
+
 NOTE: this is a LEARNED counterfactual (the network learned the effect of meals /
 insulin / activity from data). It is a research prototype, not medical advice.
 """
@@ -12,16 +15,22 @@ import torch
 
 from .model import mc_predict
 
-CARBS, STEPS, INSULIN = 1, 2, 3          # column indices in TS_COLS
+
+def col_index(meta, *names):
+    for n in names:
+        if n in meta["ts_names"]:
+            return meta["ts_names"].index(n)
+    return None
 
 
 def scenario(model, meta, window, ehr_vec, carbs=0.0, insulin=0.0, steps=0.0, n_samples=30):
-    """window: raw (L, 6) array; ehr_vec: raw (8,) array. Returns forecast dict in mg/dL."""
+    """window: raw (L, F) array; ehr_vec: raw (n_ehr,) array. Returns forecast dict in mg/dL."""
     sc = meta["scaler"]
     w = window.copy()
-    w[-1, CARBS] += carbs
-    w[-1, INSULIN] += insulin
-    w[-1, STEPS] += steps
+    for names, amount in ((("carbs",), carbs), (("insulin", "insulin_fast"), insulin), (("steps",), steps)):
+        i = col_index(meta, *names)
+        if i is not None and amount:
+            w[-1, i] += amount
 
     x = (w - np.array(sc["ts_mean"])) / np.array(sc["ts_std"])
     e = (ehr_vec - np.array(sc["ehr_mean"])) / np.array(sc["ehr_std"])

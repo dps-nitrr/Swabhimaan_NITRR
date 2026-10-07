@@ -1,8 +1,6 @@
-__pycache__/
-*.py[cod]
+inspect_output.txt
 venv/
 .venv/
-.ipynb_checkpoints/
-.DS_Store
-# big raw downloads (keep data/synthetic, it is small and reproducible)
+__pycache__/
 data/raw/
+*.pyc

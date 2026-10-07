@@ -15,6 +15,20 @@ def regression_metrics(Y_true, Y_pred, steps=(2, 4, 8)):
     return out
 
 
+def bootstrap_rmse_ci(Y_true, Y_pred, pids, h=4, n_boot=500, seed=0):
+    """95% CI of the pooled RMSE at step h, resampling whole patients/records (not windows)."""
+    err2 = (Y_true[:, h - 1] - Y_pred[:, h - 1]) ** 2
+    ids = np.unique(pids)
+    s = np.array([err2[pids == i].sum() for i in ids])
+    c = np.array([(pids == i).sum() for i in ids])
+    rng = np.random.default_rng(seed)
+    vals = []
+    for _ in range(n_boot):
+        k = rng.integers(0, len(ids), len(ids))
+        vals.append(np.sqrt(s[k].sum() / c[k].sum()))
+    return float(np.percentile(vals, 2.5)), float(np.percentile(vals, 97.5))
+
+
 def sens_at_spec(y, s, spec=0.9):
     fpr, tpr, _ = roc_curve(y, s)
     return float(np.interp(1 - spec, fpr, tpr))
@@ -34,6 +48,7 @@ def event_metrics(Y_true, scores, X_raw):
     for j, name in enumerate(["hypo", "hyper"]):
         y, s = labels[inr, j], scores[inr, j]
         out[f"{name}_prevalence"] = float(y.mean()) if len(y) else float("nan")
+        out[f"{name}_positives"] = int(y.sum())
         if y.sum() < 5 or (1 - y).sum() < 5:
             out[f"AUROC_{name}"] = float("nan")
             out[f"Sens@90Spec_{name}"] = float("nan")

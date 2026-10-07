@@ -1,12 +1,17 @@
 """Data loading, windowing, train/val/test split and scaling.
 
-Expected input schema (this is the contract for REAL data too):
-  cgm.csv : patient_id, timestamp, glucose, carbs, steps, insulin
-  ehr.csv : patient_id, age, sex, bmi, hba1c, diabetes_years, on_insulin, on_metformin, sbp
+A dataset folder contains
+  cgm.csv     : patient_id, timestamp, <time-series columns...>        (one row per reading / event)
+  ehr.csv     : patient_id, [record, patient,] <static EHR columns...> (one row per patient_id)
+  schema.json : (optional) which columns to use and how to split. Without it the SYNTHETIC defaults apply.
 
-Anything with a different format (e.g. the Shanghai T2DM dataset) just needs a
-small converter script that writes these two CSVs. The rest of the project
-does not change.
+patient_id identifies one continuous recording ("series"). In real data one person can have several
+recordings; the optional `patient` column in ehr.csv groups them so that the patient-level split never
+puts the same person in train AND test.
+
+Split modes
+  within_patient : every series is cut by time (first 70% train, next 10% val, last 20% test).
+  by_patient     : whole PEOPLE go to train / val / test (70/10/20 of people). Used for short real records.
 """
 import json
 from pathlib import Path
@@ -15,18 +20,32 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
-TS_COLS = ["glucose", "carbs", "steps", "insulin", "hour_sin", "hour_cos"]
-EHR_COLS = ["age", "sex", "bmi", "hba1c", "diabetes_years",
-            "on_insulin", "on_metformin", "sbp"]
+DEFAULT_SCHEMA = {
+    "name": "synthetic",
+    "ts_cols": ["glucose", "carbs", "steps", "insulin", "hour_sin", "hour_cos"],
+    "sum_cols": ["carbs", "steps", "insulin"],          # summed when resampling (glucose is averaged)
+    "ehr_cols": ["age", "sex", "bmi", "hba1c", "diabetes_years", "on_insulin", "on_metformin", "sbp"],
+    "split": "within_patient",
+}
+TS_COLS = DEFAULT_SCHEMA["ts_cols"]                     # kept for backwards compatibility
+EHR_COLS = DEFAULT_SCHEMA["ehr_cols"]
 STEP = "15min"
 L_DEFAULT = 24        # input window: 24 x 15 min = 6 hours
 H_DEFAULT = 8         # forecast horizon: 8 x 15 min = 2 hours
 HYPO, HYPER = 70.0, 180.0
 
 
+def load_schema(data_dir):
+    p = Path(data_dir) / "schema.json"
+    return load_json(p) if p.exists() else dict(DEFAULT_SCHEMA)
+
+
 def load_raw(data_dir):
     d = Path(data_dir)
-    cgm = pd.read_csv(d / "cgm.csv", parse_dates=["timestamp"])
+    cgm = pd.read_csv(d / "cgm.csv")
+    # real files can mix timestamp formats (with / without seconds); parse each value on its own
+    cgm["timestamp"] = pd.to_datetime(cgm["timestamp"], format="mixed", errors="coerce")
+    cgm = cgm[cgm["timestamp"].notna()].reset_index(drop=True)
     ehr = pd.read_csv(d / "ehr.csv")
     return cgm, ehr
 
@@ -49,19 +68,27 @@ def fill_small_gaps(x, max_gap):
     return x
 
 
-def patient_arrays(cgm, max_gap=2):
-    """pid -> (n, 6) array on a regular 15-min grid. Gaps <= 30 min are interpolated."""
+def patient_frames(cgm, schema=None, max_gap=2):
+    """patient_id -> DataFrame on a regular 15-min grid (columns = schema ts_cols).
+
+    Glucose is averaged per bin, event columns are summed. Glucose gaps <= 30 min are interpolated."""
+    schema = schema or DEFAULT_SCHEMA
+    base = [c for c in schema["ts_cols"] if c not in ("hour_sin", "hour_cos")]
+    agg = {c: ("sum" if c in schema["sum_cols"] else "mean") for c in base}
     out = {}
     for pid, df in cgm.groupby("patient_id"):
-        df = df.set_index("timestamp").sort_index()
-        agg = df.resample(STEP).agg({"glucose": "mean", "carbs": "sum",
-                                     "steps": "sum", "insulin": "sum"})
-        agg["glucose"] = fill_small_gaps(agg["glucose"].to_numpy(float), max_gap)
-        hour = agg.index.hour + agg.index.minute / 60
-        agg["hour_sin"] = np.sin(2 * np.pi * hour / 24)
-        agg["hour_cos"] = np.cos(2 * np.pi * hour / 24)
-        out[int(pid)] = agg[TS_COLS].to_numpy(float)
+        r = df.set_index("timestamp").sort_index()[base].resample(STEP).agg(agg)
+        r["glucose"] = fill_small_gaps(r["glucose"].to_numpy(float), max_gap)
+        hour = r.index.hour + r.index.minute / 60
+        r["hour_sin"] = np.sin(2 * np.pi * hour / 24)
+        r["hour_cos"] = np.cos(2 * np.pi * hour / 24)
+        out[int(pid)] = r[schema["ts_cols"]]
     return out
+
+
+def patient_arrays(cgm, schema=None, max_gap=2):
+    """patient_id -> (n, F) numpy array on the regular grid."""
+    return {pid: f.to_numpy(float) for pid, f in patient_frames(cgm, schema, max_gap).items()}
 
 
 def make_windows(arr, L, H):
@@ -83,38 +110,70 @@ def events(Y):
     return np.stack([(Y < HYPO).any(1), (Y > HYPER).any(1)], axis=1).astype(np.float32)
 
 
-def prepare(data_dir, L=L_DEFAULT, H=H_DEFAULT, fracs=(0.7, 0.1, 0.2)):
-    """Time-based split inside every patient (no leakage): first 70% train, next 10% val, last 20% test."""
-    cgm, ehr = load_raw(data_dir)
-    arrays = patient_arrays(cgm)
-    ehr = ehr.set_index("patient_id")[EHR_COLS].astype(float)
+def assign_groups(groups, fracs, seed):
+    """Randomly assign each distinct group (person) to train / val / test."""
+    ids = np.array(sorted({int(g) for g in groups}))
+    rng = np.random.default_rng(seed)
+    rng.shuffle(ids)
+    n_tr, n_va = int(round(len(ids) * fracs[0])), int(round(len(ids) * fracs[1]))
+    parts = {"train": ids[:n_tr], "val": ids[n_tr:n_tr + n_va], "test": ids[n_tr + n_va:]}
+    return {int(g): name for name, arr in parts.items() for g in arr}
+
+
+def prepare(data_dir, L=L_DEFAULT, H=H_DEFAULT, fracs=(0.7, 0.1, 0.2), seed=0):
+    """Build train / val / test windows (no leakage) and the scaler (fitted on TRAIN only)."""
+    schema = load_schema(data_dir)
+    cgm, ehr_raw = load_raw(data_dir)
+    arrays = patient_arrays(cgm, schema)
+    ehr_raw = ehr_raw.set_index("patient_id")
+    group_of = ehr_raw["patient"] if "patient" in ehr_raw.columns else pd.Series(ehr_raw.index, index=ehr_raw.index)
+    feat = ehr_raw[schema["ehr_cols"]].astype(float)
+
+    by_patient = schema.get("split") == "by_patient"
+    if by_patient:
+        person = assign_groups([group_of[p] for p in arrays], fracs, seed)
+        assignment = {pid: person[int(group_of[pid])] for pid in arrays}
+    else:
+        assignment = {pid: "all" for pid in arrays}
+    train_ids = [p for p, s in assignment.items() if s in ("train", "all")]
+    feat = feat.fillna(feat.loc[train_ids].mean()).fillna(0.0)          # missing labs -> TRAIN mean
 
     keys = ("X", "Y", "E", "pid", "t")
     splits = {k: {x: [] for x in keys} for k in ("train", "val", "test")}
+
+    def add(name, pid, arr, offset):
+        X, Y, t = make_windows(arr, L, H)
+        if len(X) == 0:
+            return
+        s = splits[name]
+        s["X"].append(X)
+        s["Y"].append(Y)
+        s["t"].append(t + offset)
+        s["pid"].append(np.full(len(X), pid))
+        s["E"].append(np.repeat(feat.loc[[pid]].to_numpy(), len(X), axis=0))
+
     for pid, arr in arrays.items():
-        n = len(arr)
-        b1, b2 = int(n * fracs[0]), int(n * (fracs[0] + fracs[1]))
-        for name, (a, b) in {"train": (0, b1), "val": (b1, b2), "test": (b2, n)}.items():
-            X, Y, t = make_windows(arr[a:b], L, H)
-            if len(X) == 0:
-                continue
-            s = splits[name]
-            s["X"].append(X)
-            s["Y"].append(Y)
-            s["t"].append(t + a)
-            s["pid"].append(np.full(len(X), pid))
-            s["E"].append(np.repeat(ehr.loc[[pid]].to_numpy(), len(X), axis=0))
+        if by_patient:
+            add(assignment[pid], pid, arr, 0)
+        else:
+            n = len(arr)
+            b1, b2 = int(n * fracs[0]), int(n * (fracs[0] + fracs[1]))
+            add("train", pid, arr[:b1], 0)
+            add("val", pid, arr[b1:b2], b1)
+            add("test", pid, arr[b2:], b2)
     for name in splits:
         splits[name] = {k: np.concatenate(v) for k, v in splits[name].items()}
 
-    flat = splits["train"]["X"].reshape(-1, len(TS_COLS))
+    flat = splits["train"]["X"].reshape(-1, len(schema["ts_cols"]))
+    tr_feat = feat.loc[train_ids]
     scaler = {
         "ts_mean": flat.mean(0).tolist(),
         "ts_std": np.maximum(flat.std(0), 1e-6).tolist(),
-        "ehr_mean": ehr.mean().to_numpy().tolist(),
-        "ehr_std": np.maximum(ehr.std().to_numpy(), 1e-6).tolist(),
+        "ehr_mean": tr_feat.mean().to_numpy().tolist(),
+        "ehr_std": np.maximum(tr_feat.std().fillna(0).to_numpy(), 1e-6).tolist(),
     }
-    return {"splits": splits, "scaler": scaler, "arrays": arrays, "ehr": ehr, "L": L, "H": H}
+    return {"splits": splits, "scaler": scaler, "arrays": arrays, "ehr": feat, "L": L, "H": H,
+            "schema": schema, "assignment": assignment, "group_of": group_of}
 
 
 def normalize(split, scaler):

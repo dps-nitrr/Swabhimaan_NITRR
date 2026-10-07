@@ -15,8 +15,11 @@ from .data import load_json, save_json
 
 class FusionNet(nn.Module):
     def __init__(self, n_ts_features=6, n_ehr_features=8, n_horizons=8,
-                 hidden=64, dropout=0.2):
+                 hidden=64, dropout=0.2, ehr_noise=0.0):
         super().__init__()
+        # Gaussian noise added to the (standardized) EHR vector during TRAINING only. With few patients
+        # the network could otherwise use the EHR vector as a patient ID and memorize that patient.
+        self.ehr_noise = ehr_noise
         self.conv = nn.Sequential(
             nn.Conv1d(n_ts_features, 32, kernel_size=3, padding=1),
             nn.BatchNorm1d(32), nn.ReLU(),
@@ -36,6 +39,8 @@ class FusionNet(nn.Module):
 
     def forward(self, x_ts, x_ehr):
         # x_ts: (batch, time, n_ts_features), x_ehr: (batch, n_ehr_features)
+        if self.training and self.ehr_noise > 0:
+            x_ehr = x_ehr + self.ehr_noise * torch.randn_like(x_ehr)
         h = self.conv(x_ts.transpose(1, 2)).transpose(1, 2)
         _, (h_n, _) = self.lstm(h)
         z = self.fuse(torch.cat([h_n[-1], self.ehr(x_ehr)], dim=1))

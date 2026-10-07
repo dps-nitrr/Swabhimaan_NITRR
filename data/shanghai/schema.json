@@ -1,0 +1,31 @@
+{
+  "name": "shanghai_t2dm",
+  "ts_cols": [
+    "glucose",
+    "carbs",
+    "insulin_fast",
+    "insulin_basal",
+    "hour_sin",
+    "hour_cos"
+  ],
+  "sum_cols": [
+    "carbs",
+    "insulin_fast",
+    "insulin_basal"
+  ],
+  "ehr_cols": [
+    "age",
+    "female",
+    "bmi",
+    "hba1c",
+    "diabetes_years",
+    "on_insulin",
+    "on_metformin",
+    "fpg",
+    "ppg_2h",
+    "cpep_fasting",
+    "cpep_2h",
+    "egfr"
+  ],
+  "split": "by_patient"
+}
