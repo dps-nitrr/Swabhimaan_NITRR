@@ -53,34 +53,57 @@ Python 3.10+, PyTorch, NumPy, pandas, SciPy, scikit-learn, Plotly, Streamlit.
 | What-if | learned counterfactual: edit the "now" step of the input window and re-predict |
 | Split | per patient, by time: first 70% train / next 10% validation / last 20% test (no leakage) |
 
-## 7. Datasets (anonymized / synthetic only, as required by the challenge)
+ ## 7. Datasets (anonymized / open / synthetic only, as required by the challenge)
 | Data | Source | Notes |
 |------|--------|-------|
-| EHR + CGM + logs | `src/synth.py` (our own generator) | 40 virtual T2D patients x 30 days, 15-min sampling. A mechanistic glucose-insulin simulator whose parameters depend on EHR (HbA1c, BMI, duration, metformin). Contains sensor noise and gaps. **Synthetic.** |
-| (planned) real CGM + clinical data | Shanghai T2DM open dataset | Needs a converter to the schema in `src/data.py`. Check the dataset license before use. |
+| **Real CGM + clinical data (main results)** | Shanghai T2DM dataset: Zhao Q. et al., "Chinese diabetes datasets for data-driven machine learning", *Scientific Data* 10, 35 (2023). Licence CC BY 4.0. [figshare](https://doi.org/10.6084/m9.figshare.c.6310860) | 100 patients / 109 CGM records, 15-min CGM, diet log, insulin log, demographics and lab values. Hospital inpatients in China, used as a **proxy** because no open Indian CGM dataset exists. `src/convert_shanghai.py` converts it to our schema. |
+| Synthetic cohort (sanity check, demo) | `src/synth.py` (our own generator) | 40 virtual T2D patients x 30 days with a mechanistic glucose-insulin simulator. **Synthetic.** |
 
-## 8. Results (on the synthetic test period)
-Forecast error, RMSE in mg/dL (lower is better):
+What `src/convert_shanghai.py` derives (so these inputs are **approximate**, see Limitations):
+- **Carbs**: estimated from the free-text diet log with a hand-made food table (`data/food_carbs.csv`). 20% of meals say "data not available" and get the median meal of that time of day; 7% of food weight had no match in our table at first run (mostly low-carb items, table extended afterwards).
+- **Insulin**: parsed from the text log and split into fast/premixed and long-acting (basal). Pump basal rate and i.v. insulin are ignored.
+- **HbA1c**: converted from mmol/mol to % (NGSP = 0.09148 x IFCC + 2.152). Missing lab values are filled with the *training-set* mean.
+- The "Hypoglycemia (yes/no)" column of the summary sheet is **deliberately not used** (it could describe the very period we predict, which would leak the answer).
+- No step/activity data exists in this dataset, so the activity input is absent in the real-data model.
 
-| Model | +30 min | +60 min | +120 min |
-|-------|--------:|--------:|---------:|
-| Persistence (baseline) | 16.9 | 28.9 | 41.2 |
-| Ridge regression | 9.2 | 18.7 | 26.9 |
-| FusionNet: CGM only | 10.6 | 20.5 | 28.6 |
-| FusionNet: CGM + logs | 9.4 | 17.5 | 24.9 |
-| FusionNet: CGM + EHR | 10.2 | 19.5 | 26.8 |
-| **FusionNet: CGM + logs + EHR (full)** | **9.2** | **17.1** | **23.3** |
+**Split:** whole *people* go to train / validation / test (70 / 10 / 20 people = 75 / 11 / 23 records, 74k / 11k / 24k windows). The test people are never seen in training. Scaler and imputation use training data only.
 
-Early warning of a NEW event (only windows where glucose is currently in range), AUROC:
+## 8. Results
 
-| Model | Hypo | Hyper |
-|-------|-----:|------:|
-| Persistence | 0.77 | 0.69 |
-| Ridge | 0.90 | 0.81 |
-| **FusionNet (full)** | **0.98** | **0.93** |
+### 8a. Real data (Shanghai T2DM), test = 20 unseen patients
+RMSE in mg/dL (lower is better). 95% CI of RMSE at +60 min comes from a bootstrap over records.
 
-Take-aways: (1) adding EHR helps (CGM only 20.5 -> CGM+EHR 19.5 RMSE at +60 min), (2) adding meal/insulin/activity logs helps more, (3) both together are best, (4) a simple ridge model is already strong at +30 min, so the deep model's advantage shows mainly at longer horizons and for event detection.
-Personalization (fine-tuning per patient) lowered the mean +60 min RMSE from 16.57 to 16.17 mg/dL and helped 70% of patients (Wilcoxon p = 0.0001). The gain is small; we report it honestly.
+| Model | +30 min | +60 min (95% CI) | +120 min |
+|-------|--------:|------------------|---------:|
+| Persistence (baseline) | 17.6 | 29.6 (27.0 - 32.4) | 45.2 |
+| Ridge regression | 13.3 | 24.2 (22.1 - 27.1) | 37.5 |
+| FusionNet: CGM only | 14.3 | 25.2 (22.7 - 28.3) | 38.3 |
+| FusionNet: CGM + logs | 14.0 | 24.4 (21.9 - 27.3) | 36.8 |
+| FusionNet: CGM + EHR | 14.0 | 24.9 (22.8 - 27.5) | 38.2 |
+| FusionNet: CGM + logs + EHR (full) | 14.9 | 24.6 (22.6 - 27.1) | 36.7 |
+
+Early warning of a NEW event in the next 2 h (only windows where glucose is currently 70-180 mg/dL; 693 hypo windows = 4.2%, 2905 hyper windows = 17.6%):
+
+| Model | Hypo AUROC | Hypo sens. @ 90% spec. | Hyper AUROC | Hyper sens. @ 90% spec. |
+|-------|-----------:|-----------------------:|------------:|------------------------:|
+| Persistence | 0.79 | 0.49 | 0.74 | 0.37 |
+| Ridge | 0.84 | 0.60 | 0.82 | 0.54 |
+| FusionNet: CGM only | 0.90 | 0.74 | 0.80 | 0.50 |
+| FusionNet: CGM + logs | 0.91 | 0.79 | 0.86 | 0.56 |
+| FusionNet: CGM + EHR | 0.91 | 0.77 | 0.78 | 0.45 |
+| FusionNet: full | 0.86 | 0.57 | 0.84 | 0.50 |
+
+**Personalization** (per-patient twin: copy of the population model, conv layers frozen, fine-tuned on the first half of the patient's record, evaluated on the second half; 23 unseen records): mean RMSE at +60 min 22.7 -> 21.2 mg/dL, at +120 min 33.0 -> 30.2 mg/dL; it helped 74% of records (Wilcoxon p = 0.0035).
+
+**What we can and cannot claim (honest reading):**
+1. All learned models beat persistence: about 16-18% lower RMSE at +60 min and about 19% at +120 min, and clearly better hypo/hyper early warning (hypo AUROC 0.86-0.91 vs 0.79).
+2. With only 100 patients we could **not** show that the deep FusionNet beats a plain ridge regression on RMSE: the 95% intervals of all learned models overlap. We do not claim otherwise.
+3. Adding EHR features did **not** measurably improve accuracy on this small dataset (CGM-only 25.2 vs CGM + EHR 24.9, within noise). The full model's hypo AUROC (0.86) is lower than the CGM + logs model (0.91); AUROCs have no confidence interval here and come from correlated overlapping windows of 23 records, so differences of a few points are not reliable.
+4. The clearest, statistically supported gain is **personalization** (+60 min RMSE -7%, p = 0.0035).
+5. The project's value is the integrated, working pipeline: EHR + wearable fusion, uncertainty (MC-Dropout), adverse-event prediction, what-if simulation and the doctor dashboard, evaluated honestly on unseen patients.
+
+### 8b. Synthetic data (sanity check)
+On our synthetic cohort the full model gives the best RMSE and event AUROC, which shows the pipeline works end to end when the signal is strong. These numbers are **not** evidence of clinical accuracy. Re-create them with `python -m src.synth` followed by `python -m src.train`.
 
 ## 9. How to Run
 ```bash
@@ -88,12 +111,18 @@ git clone <repo-url> && cd <repo-folder>
 python -m venv venv && source venv/bin/activate      # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-python -m src.synth --patients 40 --days 30          # 1. generate synthetic cohort (seconds)
-python -m src.train --epochs 40                      # 2. baselines + ablation, saves models/fusion_full.pt
-python -m src.personalize                            # 3. per-patient twins
-streamlit run app/dashboard.py                       # 4. doctor dashboard
+# Synthetic data (seconds)
+python -m src.synth --patients 40 --days 30
+python -m src.train --epochs 40
+python -m src.personalize
+
+# Real data: download Shanghai T2DM (CC BY 4.0) from figshare, unzip to data/raw/shanghai/, then
+python -m src.convert_shanghai --raw data/raw/shanghai --out data/shanghai
+python -m src.train --data data/shanghai --models models/shanghai --results results/shanghai --epochs 40
+python -m src.personalize --data data/shanghai --models models/shanghai --results results/shanghai
+
+streamlit run app/dashboard.py                       # doctor dashboard (sidebar: real / synthetic)
 ```
-A trained `models/fusion_full.pt` is included, so step 4 works right after step 1.
 
 ## 10. Repository Structure
 ```
@@ -132,11 +161,15 @@ Third-party libraries: PyTorch (BSD-style), NumPy / pandas / SciPy / scikit-lear
 Ideas credited: Prendin et al., IEEE TBME 2025 (digital-twin-based data augmentation); Barbiero et al., "Digital Patient" (graph-based patient twin). No code from these projects is copied.
 
 ## 13. Limitations, Privacy and Ethics
-- All data is **synthetic**. Results show the method works end to end, **not** clinical accuracy. Real validation needs real, consented, anonymized data.
-- The what-if feature is a learned counterfactual, not a validated physiological simulator.
-- Designed with the DPDP Act in mind (no real patient data, data minimization, local processing). Research prototype, **not a medical device**.
+- The real data are **Chinese hospital inpatients**, not Indian outpatients: diet, medication and glycaemic patterns differ. Results show the method works on real CGM, **not** that it is validated for Indian patients. Validation on Indian, consented, anonymized data is the next step.
+- Meal carbohydrates are **estimated** from free-text diet logs (and 20% of meals are imputed), insulin doses are parsed from text, and there is no activity data. The what-if effects of carbs/insulin are therefore only as good as these approximations.
+- Small dataset (100 patients, short records): no significant advantage of the deep model over ridge regression was found, EHR features gave no measurable gain, and AUROC values have no confidence intervals. Hypo events are rare (4.2% of in-range windows).
+- The what-if feature is a **learned counterfactual**, not a validated physiological simulator, and was not validated against real interventions.
+- Designed with the DPDP Act in mind (only open, anonymized or synthetic data, data minimization, local processing). Research prototype, **not a medical device and not medical advice**.
 
 ## 14. References
+- Zhao Q., Zhu J., Shen X. et al., "Chinese diabetes datasets for data-driven machine learning," *Scientific Data* 10, 35 (2023). Data licensed CC BY 4.0, https://doi.org/10.6084/m9.figshare.c.6310860
 - Prendin F., Facchinetti A., Cappon G., "Data Augmentation via Digital Twins to Develop Personalized Deep Learning Glucose Prediction Algorithms for Type 1 Diabetes in Poor Data Context," IEEE TBME, 2025.
 - Cappon G. et al., "ReplayBG," IEEE TBME, 2023.
 - Barbiero P., Viñas Torné R., Liò P., "Graph representation forecasting of patient's medical conditions: towards a digital twin," 2020.
+
