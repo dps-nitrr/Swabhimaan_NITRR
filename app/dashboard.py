@@ -98,7 +98,9 @@ with st.sidebar:
         tag = f" ({data['assignment'][p]})" if by_patient else ""
         return f"Record {p}{tag}"
 
-    pid = st.selectbox("Record", sorted(usable), format_func=label)
+    options = sorted(usable)
+    first_test = next((i for i, p in enumerate(options) if by_patient and data["assignment"][p] == "test"), 0)
+    pid = st.selectbox("Record", options, index=first_test, format_func=label)
     if by_patient:
         st.caption("'test' = person never seen in training (honest evaluation); 'train' = seen.")
     arr = data["arrays"][pid]
