@@ -18,7 +18,7 @@ import torch
 from sklearn.linear_model import Ridge
 
 from .data import normalize, prepare
-from .engine import fit, get_device, predict
+from .engine import fit, get_device, make_consistency, predict
 from .metrics import bootstrap_rmse_ci, event_metrics, regression_metrics, scores_from_forecast
 from .model import FusionNet, save_artifacts
 
@@ -57,6 +57,8 @@ def main():
     ap.add_argument("--models", default="models")
     ap.add_argument("--results", default="results")
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-consistency", action="store_true",
+                    help="train without the physiological sign prior (carbs up, insulin/steps down)")
     args = ap.parse_args()
 
     torch.manual_seed(args.seed)
@@ -94,14 +96,16 @@ def main():
         print(f"\n== training {name} ==")
         model = FusionNet(n_ts_features=len(cfg["ts_cols"]), n_ehr_features=n_ehr,
                           n_horizons=data["H"], ehr_noise=ehr_noise if cfg["use_ehr"] else 0.0)
-        fit(model, pack(tr, sc, cfg), pack(va, sc, cfg), epochs=args.epochs, device=device)
+        cons = None if args.no_consistency else make_consistency(sc, schema["ts_cols"], cfg["ts_cols"])
+        fit(model, pack(tr, sc, cfg), pack(va, sc, cfg), epochs=args.epochs, device=device, consistency=cons)
         Xt, Et, _, _ = pack(te, sc, cfg)
         Yp, P = predict(model, Xt, Et, sc, device)
         rows.append(report(name, te, Yp, P))
         if name == "fusion_full":
             meta = {"scaler": sc, "ts_cols": cfg["ts_cols"], "ts_names": schema["ts_cols"],
                     "ehr_names": schema["ehr_cols"], "L": data["L"], "H": data["H"],
-                    "data_dir": args.data, "seed": args.seed, "schema": schema}
+                    "data_dir": args.data, "seed": args.seed, "schema": schema,
+                    "sign_prior": not args.no_consistency}
             save_artifacts(model, meta, args.models, name)
             print("saved ->", Path(args.models) / f"{name}.pt")
 

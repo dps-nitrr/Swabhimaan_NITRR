@@ -21,7 +21,7 @@ import pandas as pd
 from scipy.stats import wilcoxon
 
 from .data import make_windows, normalize, prepare, select
-from .engine import fit, get_device, predict
+from .engine import fit, get_device, make_consistency, predict
 from .model import load_artifacts
 
 MIN_FIT, MIN_VAL, MIN_EVAL = 20, 5, 10
@@ -80,6 +80,7 @@ def main():
     else:
         pids = sorted(set(sp["train"]["pid"]))
 
+    cons = make_consistency(sc, meta["ts_names"], cols) if meta.get("sign_prior") else None
     rows, skipped = [], 0
     for pid in pids:
         parts = patient_parts(data, sp, pid)
@@ -92,7 +93,7 @@ def main():
 
         twin = copy.deepcopy(pop_model)
         fit(twin, pack(tr), pack(va), epochs=args.epochs, lr=args.lr, patience=4,
-            device=device, freeze_conv=True, verbose=False)
+            device=device, freeze_conv=True, verbose=False, consistency=cons)
         twin_pred, _ = predict(twin, Xt, Et, sc, device)
 
         rows.append({"patient_id": int(pid), "n_eval_windows": len(te["X"]),

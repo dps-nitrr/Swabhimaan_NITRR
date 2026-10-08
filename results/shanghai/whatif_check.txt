@@ -1,0 +1,2 @@
++50 g carbs: mean change at +30/60/120 min = +30.5 / +38.4 / +36.6 mg/dL; expected direction (up) in 99% of 575 windows
++4 U fast insulin: mean change at +30/60/120 min = -29.1 / -27.0 / -23.2 mg/dL; expected direction (down) in 98% of 575 windows

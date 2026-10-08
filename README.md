@@ -51,10 +51,10 @@ Python 3.10+, PyTorch, NumPy, pandas, SciPy, scikit-learn, Plotly, Streamlit, op
 | Static branch | MLP over EHR features (8 on synthetic data; 12 on Shanghai: age, sex, BMI, HbA1c, diabetes duration, insulin / metformin use, fasting and 2 h glucose, C-peptide, eGFR). Gaussian noise on the EHR vector during training stops the network from memorizing individual patients |
 | Fusion | concatenate both embeddings -> dense layer with dropout |
 | Outputs | glucose at +15 ... +120 min (8 values) and P(hypo), P(hyper) |
-| Loss | MSE (glucose) + 0.5 x BCE (events) |
+| Loss | MSE (glucose) + 0.5 x BCE (events) + a physiological **sign prior**: during training the same window is also fed with extra carbs / insulin / steps, and the loss penalizes a forecast that moves the wrong way (carbs must not lower glucose, insulin and steps must not raise it). Only the direction is constrained; the size of the effect is learned |
 | Personalization | copy population model, freeze Conv layers, fine-tune on one patient's own early data |
 | Uncertainty | Monte-Carlo Dropout (30 samples) |
-| What-if | learned counterfactual: edit the "now" step of the input window and re-predict |
+| What-if | learned counterfactual with the sign prior above: edit the "now" step of the input window and re-predict |
 | Split | synthetic: per patient by time (70 / 10 / 20). Real data: by PERSON (70 / 10 / 20 people); test people are never seen in training |
 | Baselines | persistence (future = now) and ridge regression |
 | Ablation | 2 x 2: CGM only / CGM + logs, each without / with EHR |
@@ -83,10 +83,10 @@ RMSE in mg/dL (lower is better). The 95% CI of RMSE at +60 min comes from a boot
 |-------|--------:|------------------|---------:|
 | Persistence (baseline) | 17.6 | 29.6 (27.0 - 32.4) | 45.2 |
 | Ridge regression | 13.3 | 24.2 (22.1 - 27.1) | 37.5 |
-| FusionNet: CGM only | 14.3 | 25.2 (22.7 - 28.3) | 38.3 |
-| FusionNet: CGM + logs | 14.0 | 24.4 (21.9 - 27.3) | 36.8 |
-| FusionNet: CGM + EHR | 14.0 | 24.9 (22.8 - 27.5) | 38.2 |
-| FusionNet: CGM + logs + EHR (full) | 14.9 | 24.6 (22.6 - 27.1) | 36.7 |
+| FusionNet: CGM only | 14.3 | 25.1 (22.6 - 28.1) | 38.1 |
+| FusionNet: CGM + logs | 14.8 | 24.9 (22.1 - 28.2) | 37.1 |
+| FusionNet: CGM + EHR | 13.9 | 24.6 (22.6 - 27.2) | 37.5 |
+| FusionNet: CGM + logs + EHR (full) | 16.3 | 25.5 (22.7 - 28.7) | 37.2 |
 
 Early warning of a NEW event in the next 2 h (only windows where glucose is currently 70-180 mg/dL; 693 hypo windows = 4.2%, 2905 hyper windows = 17.6%):
 
@@ -94,20 +94,29 @@ Early warning of a NEW event in the next 2 h (only windows where glucose is curr
 |-------|-----------:|-----------------------:|------------:|------------------------:|
 | Persistence | 0.79 | 0.49 | 0.74 | 0.37 |
 | Ridge | 0.84 | 0.60 | 0.82 | 0.54 |
-| FusionNet: CGM only | 0.90 | 0.74 | 0.80 | 0.50 |
-| FusionNet: CGM + logs | 0.91 | 0.79 | 0.86 | 0.56 |
-| FusionNet: CGM + EHR | 0.91 | 0.77 | 0.78 | 0.45 |
-| FusionNet: full | 0.86 | 0.57 | 0.84 | 0.50 |
+| FusionNet: CGM only | 0.90 | 0.73 | 0.81 | 0.50 |
+| FusionNet: CGM + logs | 0.89 | 0.65 | 0.86 | 0.58 |
+| FusionNet: CGM + EHR | 0.86 | 0.65 | 0.80 | 0.50 |
+| FusionNet: full | 0.87 | 0.61 | 0.85 | 0.56 |
 
-**Personalization** (per-patient twin: copy of the population model, conv layers frozen, fine-tuned on the first half of the patient's record, evaluated on the second half; 23 unseen records): mean RMSE at +60 min 22.7 -> 21.2 mg/dL, at +120 min 33.0 -> 30.2 mg/dL; it helped 74% of records (Wilcoxon p = 0.0035).
+**Personalization** (per-patient twin: copy of the population model, conv layers frozen, fine-tuned on the first half of the patient's record, evaluated on the second half; 23 unseen records): mean RMSE at +60 min 23.1 -> 21.2 mg/dL, at +120 min 32.3 -> 29.8 mg/dL; it helped 74% of records (Wilcoxon p = 0.0024).
 
-All numbers are saved in `results/shanghai/metrics.csv` and `results/shanghai/personalization.csv`.
+**What-if check** (`python -m src.check_whatif`, 575 random windows of unseen test patients; carbs should raise glucose, insulin should lower it):
+
+| Added at "now" | Mean change at +30 / +60 / +120 min | Direction as expected |
+|----------------|-------------------------------------|----------------------:|
+| +50 g carbohydrates | +30.5 / +38.4 / +36.6 mg/dL | 99% of windows |
+| +4 U fast insulin | -29.1 / -27.0 / -23.2 mg/dL | 98% of windows |
+
+Without the physiological sign prior (see section 6) the same check gave the wrong direction for insulin (+8.6 mg/dL at +60 min, expected direction in only 18% of windows), because in observational data insulin is given when glucose is already high. We found this by testing the what-if feature and fixed it; both results are kept in `results/shanghai/whatif_check*.txt`.
+
+All numbers are saved in `results/shanghai/` (`metrics.csv`, `personalization.csv`, what-if checks).
 
 **What we can and cannot claim (honest reading):**
-1. All learned models beat persistence: about 16-18% lower RMSE at +60 min and about 19% at +120 min, and clearly better hypo / hyper early warning (hypo AUROC 0.86-0.91 vs 0.79).
+1. All learned models beat persistence: about 14-17% lower RMSE at +60 min and about 17-18% at +120 min, and clearly better hypo / hyper early warning (hypo AUROC 0.86-0.90 vs 0.79).
 2. With only 100 patients we could **not** show that the deep FusionNet beats a plain ridge regression on RMSE: the 95% intervals of all learned models overlap. We do not claim otherwise.
-3. Adding EHR features did **not** measurably improve accuracy on this small dataset (CGM only 25.2 vs CGM + EHR 24.9, within noise). The full model's hypo AUROC (0.86) is lower than the CGM + logs model (0.91); AUROCs have no confidence interval here and come from correlated, overlapping windows of 23 records, so differences of a few points are not reliable.
-4. The clearest, statistically supported gain is **personalization** (+60 min RMSE -7%, p = 0.0035).
+3. Adding EHR features did **not** measurably improve accuracy on this small dataset (CGM only 25.1 vs CGM + EHR 24.6, within noise). Hypo AUROC differs between variants (0.86-0.90) without a pattern; AUROCs have no confidence interval here and come from correlated, overlapping windows of 23 records, so differences of a few points are not reliable.
+4. The clearest, statistically supported gain is **personalization** (+60 min RMSE -8%, p = 0.0024).
 5. The project's value is the integrated, working pipeline: EHR + wearable fusion, uncertainty (MC-Dropout), adverse-event prediction, what-if simulation and the doctor dashboard, evaluated honestly on unseen patients.
 
 ### 8b. Synthetic data (sanity check)
@@ -155,6 +164,7 @@ Training runs on CPU in minutes; a GPU is used automatically if PyTorch can see 
 │   ├── train.py          # baselines + ablation
 │   ├── personalize.py    # per-patient fine-tuning
 │   ├── whatif.py         # what-if simulation
+│   ├── check_whatif.py   # sanity check of what-if directions
 │   └── metrics.py
 ├── app/dashboard.py      # Streamlit dashboard
 └── docs/                 # architecture.pdf, presentation.pdf
@@ -181,7 +191,7 @@ Ideas credited: Prendin et al., IEEE TBME 2025 (digital-twin-based data augmenta
 - The real data are **Chinese hospital inpatients**, not Indian outpatients: diet, medication and glycaemic patterns differ. Results show the method works on real CGM, **not** that it is validated for Indian patients. Validation on Indian, consented, anonymized data is the next step.
 - Meal carbohydrates are **estimated** from free-text diet logs (and 20% of meals are imputed), insulin doses are parsed from text, and there is no activity data. The what-if effects of carbs / insulin are therefore only as good as these approximations.
 - Small dataset (100 patients, short records): no significant advantage of the deep model over ridge regression was found, EHR features gave no measurable gain, and AUROC values have no confidence intervals. Hypo events are rare (4.2% of in-range windows).
-- The what-if feature is a **learned counterfactual**, not a validated physiological simulator, and was not validated against real interventions.
+- The what-if feature is a **learned counterfactual**, not a validated physiological simulator, and was not validated against real interventions. Its direction is enforced by a sign prior and checked on unseen patients, but the size of the effects is learned from observational data (where insulin and meals are confounded with the glucose level) and is not clinically validated.
 - Designed with the DPDP Act in mind (only open, anonymized or synthetic data, data minimization, local processing). Research prototype, **not a medical device and not medical advice**.
 
 ## 14. References
